@@ -2,9 +2,13 @@ import traceback
 import re
 import requests
 import os
+import logging
+from time import sleep
 from bs4 import BeautifulSoup
 from matrix_client.client import MatrixClient
 from matrix_client.api import MatrixRequestError
+
+logger = logging.getLogger("goodreads-matrix-bot")
 
 USERNAME = os.environ['USERNAME']
 PASSWORD = os.environ['PASSWORD']
@@ -12,44 +16,43 @@ SERVER = os.environ['SERVER']
 
 class MatrixBot:
 
-    # username - Matrix username
-    # password - Matrix password
-    # server   - Matrix server url : port
-    # rooms    - List of rooms ids to operate in, or None to accept all rooms
-    def __init__(self, username, password, server, rooms=None):
-        self.username = username
-
-        # Authenticate with given credentials
-        self.client = MatrixClient(server)
+    def connect(self):
         try:
-            self.client.login_with_password(username, password)
-        except MatrixRequestError as e:
-            print(e)
-            if e.code == 403:
-                print("Bad username/password")
-        except Exception as e:
-            print("Invalid server URL")
-            traceback.print_exc()
+            logger.info("connecting to {}".format(self.server))
+            self.client = MatrixClient(self.server)
+            self.client.login_with_password(self.username, self.password)
+            logger.info("connection established")
 
-        # Store allowed rooms
-        self.rooms = rooms
+            # Store empty list of handlers
+            self.handlers = []
 
-        # Store empty list of handlers
-        self.handlers = []
-
-        # If rooms is None, we should listen for invites and automatically accept them
-        if rooms is None:
+            # listen for invites and automatically accept them
             self.client.add_invite_listener(self.handle_invite)
             self.rooms = []
 
             # Add all rooms we're currently in to self.rooms and add their callbacks
             for room_id, room in self.client.get_rooms().items():
                 room.add_listener(self.handle_message)
-                self.rooms.append(room_id)
-        else:
-            # Add the message callback for all specified rooms
-            for room in self.rooms:
-                room.add_listener(self.handle_message)
+       	        self.rooms.append(room_id)
+
+        except Exception:
+            logger.warning(
+                "connection to {} failed".format(self.server) +
+                ", retrying in 5 seconds...")
+            sleep(5)
+            self.connect()
+
+    # username - Matrix username
+    # password - Matrix password
+    # server   - Matrix server url : port
+    # rooms    - List of rooms ids to operate in, or None to accept all rooms
+    def __init__(self, username, password, server, rooms=None):
+        self.username = username
+        self.password = password
+        self.server = server
+        self.rooms = rooms
+
+        self.connect()
 
     def add_handler(self, handler):
         self.handlers.append(handler)
@@ -59,19 +62,22 @@ class MatrixBot:
         if re.match("@" + self.username, event['sender']):
             return
 
-        if event['type'] == "m.room.message":
-            rx_msg = event['content']['body']
-            if re.search(r"#book", rx_msg):
-                book_url = self.get_book_url(rx_msg)
-                print('found book: '+book_url)
-                if (book_url):
-                    img_info = self.get_book_img(book_url)
-                    img = requests.get(img_info['url'])
-                    mxc_url = self.client.upload(img.content, 'image/jpeg')
-                    #html = "<a href='"+book_url+"'><img src='"+mxc_url+"'/></a>"
-                    #print(html)
-                    room.send_image(mxc_url, img_info['title'])
-                    room.send_text(book_url)
+        try:
+            if event['type'] == "m.room.message":
+                rx_msg = event['content']['body']
+                if re.search(r"#book", rx_msg):
+                    book_url = self.get_book_url(rx_msg)
+                    print('found book: '+book_url)
+                    if (book_url):
+                        img_info = self.get_book_img(book_url)
+                        img = requests.get(img_info['url'])
+                        mxc_url = self.client.upload(img.content, 'image/jpeg')
+                        #html = "<a href='"+book_url+"'><img src='"+mxc_url+"'/></a>"
+                        #print(html)
+                        room.send_image(mxc_url, img_info['title'])
+                        room.send_text(book_url)
+        except (TypeError):
+            pass
 
     def handle_invite(self, room_id, state):
         print("Got invite to room: " + str(room_id))
@@ -107,7 +113,8 @@ class MatrixBot:
 
     def start_polling(self):
         # Starts polling for messages
-        self.client.start_listener_thread()
+        self.client.start_listener_thread(
+	    exception_handler=lambda e: self.connect())
         return self.client.sync_thread
 
 def main():
@@ -119,7 +126,7 @@ def main():
 
     # Infinitely read stdin to stall main thread while the bot runs in other threads
     while True:
-        input()
+        sleep(1)
 
 if __name__ == "__main__":
     main()
